@@ -1,43 +1,79 @@
-////////////////////////////////////////////////
+#include <Arduino.h>
+#include <TinyWireM.h>
+#include <avr/sleep.h>
+#include <avr/power.h>
+
+#define Wire TinyWireM
+
+
+constexpr char setDate[] = (__DATE__);
+constexpr char setTime[] = (__TIME__);
+
+const uint8_t daysInMonth[] PROGMEM = {31, 28, 31, 30, 31, 30,
+                                       31, 31, 30, 31, 30};
+
+// https://github.com/adafruit/RTClib
+
+
+///////////////////////////////////////////////
 ///     
 ///     R  -  RST  -  reset button
 ///     0  -  SDA  -  FRAM, RTC
 ///     1  -       -  setting switch?
 ///     2  -  SCL  -  FRAM, RTC
 ///     3  -  A3   -  light sensor
-///     4  -       -  RTC wakeup?
+///     4  -       -  RTC INT
 ///     
 ///     build inside diffuser globe
 ///     
 ///     
 
-#include <Arduino.h>
-
-#include <TinyWireM.h>
-
-#define Wire TinyWireM
 
 // include FRAM -> modify for TinyWire
 // include RTC  -> modify for TinyWire
 // include sleep
+constexpr byte MB85RC_ADRRESS  = 0x50;
 
 constexpr byte PCF8523_ADDRESS = 0x68;
+constexpr byte Control_1       = 0x00;
 constexpr byte Control_2       = 0x01;
-constexpr byte CONTROL_3       = 0x02;
+constexpr byte Control_3       = 0x02;
 constexpr byte Tmr_CLKOUT_ctrl = 0x0F;
 constexpr byte Tmr_A_freq_ctrl = 0x10;
 constexpr byte Tmr_A_reg       = 0x11;
 
-constexpr byte settingPin =
-constexpr byte ldrPin     =
-
-Wire.begin();
+constexpr byte settingPin = 1;
+constexpr byte sunPin     = 4;
 
 // interrupt to count RTC's WDT output
 
 //=================================================================================
 
 EMPTY_INTERRUPT(PCINT0_vect)
+
+//=================================================================================
+
+byte writeRegister(byte addr, byte reg, byte data) {
+  Wire.beginTransmission(addr);
+  Wire.send(reg);
+  Wire.send(data);
+  return Wire.endTransmission();
+}
+
+//=================================================================================
+
+byte readRegister(byte addr, byte reg, byte size = 1) {
+  Wire.beginTransmission(addr);
+  Wire.send(reg);
+  Wire.endTransmission();
+  Wire.requestFrom(addr, size);
+  return Wire.read();
+}
+
+//=================================================================================
+
+uint8_t bin2bcd(uint8_t val) { return val + 6 * (val / 10); }
+uint8_t bcd2bin(uint8_t val) { return val - 6 * (val >> 4); }
 
 //=================================================================================
 
@@ -53,6 +89,17 @@ void goToSleep() {
   sleep_disable();
 
   GIMSK = 0b00000000;
+}
+
+//=================================================================================
+
+void updateTime(byte *date) {
+  date[5] = readRegister(PCF8523_ADDRESS, 0x03);
+  date[4] = readRegister(PCF8523_ADDRESS, 0x04);
+  date[3] = readRegister(PCF8523_ADDRESS, 0x05);
+  date[2] = readRegister(PCF8523_ADDRESS, 0x06);
+  date[1] = readRegister(PCF8523_ADDRESS, 0x08);
+  date[0] = readRegister(PCF8523_ADDRESS, 0x09);
 }
 
 //=================================================================================
@@ -104,53 +151,116 @@ int getReading (byte port) {
 
 //=================================================================================
 
-byte checkSun() {
-  static int average = 0;
-  static byte count  = 0;
+long date2sec(uint8_t *date){
+  const uint8_t daysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30};
+  int days = 0;
+  days += date[0] * 365 + (date[0] / 4); // year
+  for(uint8_t i=0; i<date[1]-1; i++) { // month
+    days += daysInMonth[i];
+  }
+  days += date[2]; // days; current day made up for by leap in 2000
 
-  average += getReading;
-  count ++;
+  long seconds = days * 60 * 60 * 24;
+  seconds += date[3] * 60 * 60; // hours
+  seconds += date[4] * 60; // minutes
+  seconds += date[5]; // seconds
 
-  if(count == 5){
-    saveToFram(average/count);
-    average = 0;
-    count = 0;
+  return seconds + 946684800;
+}
+
+//=================================================================================
+
+void saveToFram(int data) {
+  static int framPosition = 0;
+
+  if(framPosition == 0){
+    Wire.beginTransmission(MB85RC_ADRRESS);
+    Wire.write(0);
+    Wire.write(0);
+    Wire.endTransmission();
+
+    Wire.requestFrom(MB85RC_ADRRESS, uint8_t(2));
+
+    framPosition = (Wire.read() << 8);
+    framPosition += Wire.read();
   }
 
-  // on 5th average (or n) convert
-    // normalize/linearize and compress to byte and save to FRAM
-}
-
-//=================================================================================
-
-long secondsTime() {
-  // query RTC for seconds timestamp
-  
-  // return time;
-}
-
-//=================================================================================
-
-void saveToFram(byte data) {
+  byte date[6];
   // read active address
     // write if missing
   // write new data to address ++
   // get time now
   // write time now
   // some sort of signal if full (unlikely)
+
+  updateTime(date);
+  long seconds = date2sec(date);
+  //write data to fram
+}
+
+//=================================================================================
+
+void checkSun() {
+  static int average = 0;
+  static byte count  = 0;
+
+  average += getReading(sunPin);
+  count ++;
+
+  if(count == 3){
+    saveToFram(average/count);
+    average = 0;
+    count = 0;
+  }
+
+  saveToFram(average);
 }
 
 //=================================================================================
 
 void configureRTC() {
-  // adjust time
-  // CONTROL_3 = 0;
-  //
+  // read __DATE__ and __TIME__ into byte array
+  byte date[6];
+  date[0]     = ((setDate[9] - 48) * 10) + ((setDate[10] - 48));
+  date[1]     = (setDate[0] == 'J') ? ((setDate[1] == 'a') ? 1 : ((setDate[2] == 'n') ? 6 : 7))    // Jan, Jun or Jul
+                                    : (setDate[0] == 'F') ? 2                                                              // Feb
+                                    : (setDate[0] == 'M') ? ((setDate[2] == 'r') ? 3 : 5)                                 // Mar or May
+                                    : (setDate[0] == 'A') ? ((setDate[2] == 'p') ? 4 : 8)                                 // Apr or Aug
+                                    : (setDate[0] == 'S') ? 9                                                              // Sep
+                                    : (setDate[0] == 'O') ? 10                                                             // Oct
+                                    : (setDate[0] == 'N') ? 11                                                             // Nov
+                                    : (setDate[0] == 'D') ? 12                                                             // Dec
+                                    : 0;
+  date[2]     = ((setDate[4] - 48) * 10) + (setDate[5] - 48);
+  date[3]     = ((setTime[0] - 48) * 10) + (setTime[1] - 48);
+  date[4]     = ((setTime[3] - 48) * 10) + (setTime[4] - 48);
+  date[5]     = ((setTime[6] - 48) * 10) + (setTime[7] - 48);
+  // set time
+  Wire.beginTransmission(PCF8523_ADDRESS);
+  Wire.send(byte(3));
+  Wire.send(bin2bcd(date[5]));
+  Wire.send(bin2bcd(date[4]));
+  Wire.send(bin2bcd(date[3]));
+  Wire.send(bin2bcd(date[2]));
+  Wire.send(bin2bcd(0));
+  Wire.send(bin2bcd(date[1]));
+  Wire.send(bin2bcd(date[0]));
+  Wire.endTransmission();
 
+  // set batter switchover
+  writeRegister(PCF8523_ADDRESS, Control_3, byte(0));
 
-  //Control_2 = 0b00000010; // turn on timerA interrupts;
+  // ensure RTC running
+  byte ctlreg = readRegister(PCF8523_ADDRESS, Control_1);
+  if (ctlreg & (1 << 5)) {
+    writeRegister(PCF8523_ADDRESS, Control_1, ctlreg & ~(1 << 5));
+  }
 
-
+  // turn on timerA interrupts;
+  writeRegister(PCF8523_ADDRESS, Control_2,       0b00000010);
+  writeRegister(PCF8523_ADDRESS, Tmr_CLKOUT_ctrl,   0b11110010);
+  writeRegister(PCF8523_ADDRESS, Tmr_A_freq_ctrl, 0b00000011);
+  writeRegister(PCF8523_ADDRESS, Tmr_A_reg,       0b00000101); // 5 minutes
 
   // disable clockout for int function
   // countdown timer 8.9.2.2
@@ -168,19 +278,19 @@ void configureRTC() {
 //=================================================================================
 
 void setup() {
-  pinMode(settingPin, INPUT_PULLUP);
-  if(digitalRead(settingPin)) goToSleep(); // switch pulls down for in use (won't be floating)
-  pinMode(settingPin, INPUT);
+  //pinMode(settingPin, INPUT_PULLUP);
+  //if(digitalRead(settingPin)) goToSleep(); // switch pulls down for in use (won't be floating)
+  //pinMode(settingPin, INPUT);
 
-  // set up RTC
-
+  configureRTC();
+  saveToFram(0xFF); // marker for starting new measurements
 }
 
 //=================================================================================
 
 void loop() {
-  // checkSun
-  // goto sleep
+  checkSun();
+  goToSleep();
 }
 
 
@@ -192,3 +302,5 @@ void loop() {
 // Temperature??
 
 // datastructure: time in sec, light reading
+
+// what about button to make note in datastore? -> maybe just on rst?
