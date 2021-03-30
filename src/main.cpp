@@ -1,3 +1,13 @@
+// TODO change date reference system:
+
+// At start, system will store a reference date/time in the data header area
+// data points will have the structure: RRRCCCCC CCCCCCDD DDDDDDDD (3 bytes)
+// R = date reference number (16 starting date/times)
+// C = count (sample number since reference time)
+// D = data (10 bit sample data)
+
+
+
 #include <Arduino.h>
 #include <TinyWireM.h>
 #include <avr/sleep.h>
@@ -14,26 +24,23 @@ const uint8_t daysInMonth[] PROGMEM = {31, 28, 31, 30, 31, 30,
 
 // https://github.com/adafruit/RTClib
 
-
-///////////////////////////////////////////////
-///     
-///     R  -  RST  -  reset button
-///     0  -  SDA  -  FRAM, RTC
-///     1  -       -  setting switch?
-///     2  -  SCL  -  FRAM, RTC
-///     3  -  A3   -  light sensor
-///     4  -       -  RTC INT
-///     
-///     build inside diffuser globe
-///     
-///     
+//                ┌─────u─────┐
+//            NC -│RST     VCC│- 3.3V
+//                │           │
+//  light sensor -│PB3     SCL│- FRAM, RTC, 4.7k pullup
+//                │           │
+//   RTC SQW INT -│PB4     PB1│- setting switch?
+//                │           │
+//           GND -│GND     SDA│- FRAM, RTC, 4.7k pullup
+//                └───────────┘
+//
+//     build inside diffuser globe
 
 
-// include FRAM -> modify for TinyWire
-// include RTC  -> modify for TinyWire
-// include sleep
+// FRAM I2C address
 constexpr byte MB85RC_ADRRESS  = 0x50;
 
+// RTC address and registers
 constexpr byte PCF8523_ADDRESS = 0x68;
 constexpr byte Control_1       = 0x00;
 constexpr byte Control_2       = 0x01;
@@ -45,10 +52,10 @@ constexpr byte Tmr_A_reg       = 0x11;
 constexpr byte settingPin = 1;
 constexpr byte sunPin     = 4;
 
-// interrupt to count RTC's WDT output
 
 //=================================================================================
 
+// empty interrupt to wake for sample measurement (from RTC)
 EMPTY_INTERRUPT(PCINT0_vect)
 
 //=================================================================================
@@ -171,6 +178,7 @@ long date2sec(uint8_t *date){
 //=================================================================================
 
 void saveToFram(int data) {
+  static byte date[6];
   static int framPosition = 0;
 
   if(framPosition == 0){
@@ -212,8 +220,6 @@ void checkSun() {
     average = 0;
     count = 0;
   }
-
-  saveToFram(average);
 }
 
 //=================================================================================
